@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+#
+# script: route-settings
+# author: suo.li
+# created: 2020.06.19
+# It dose: Modify a container's route on prestart stage. When a container is 
+#          created and before it started(prestart stage), this script will be 
+#          called , and it will use JSON.awk to parse container's status 
+#          file(json) to get the respective image name, and then parse a txt 
+#          file contains route info(HadoopContainerRoute.txt), finally add 
+#          the route rule to container's route table.
+
+declare -A ROUTE
+
+HDIN=
+HCIN="hadoop_controller"
+HGIN="hadoop_gateway"
+NS_DIR="/var/run/netns"
+logFile="/tmp/hook.log"
+awkJsonPath="/tmp/JSON.awk"
+hadoopContainerRoute="/run/initramfs/live/HadoopContainerRoute.txt"
+
+## debug log
+if [[ ! -f $logFile ]]; then
+  touch $logFile
+fi
+echo -e "\n\n#--------------BEGIN:`date +%F\ %T\ %N`:BEGIN--------------#" >> $logFile
+
+## Skip hadoop_controller and hadoop_gateway, won't modify them. ##
+#-----------------------------------------------------------------#
+# Hadoop Controller image name : hadoop_controller
+# Hadoop gateway image name    : hadoop_gateway
+
+#### test ####
+#n1="gateway"
+#docker inspect -f {{.State.Pid}} $n1
+
+## judge if the container is hadoop_controller or hadoop_gateway
+# get congfig.v2.json --> parse it use awk --> get Image name
+# see if Image name contains "hadoop_gateway" or "hadoop_controller"
+configJsonPath=`ps -ef | grep -v "grep" | grep "prestart" | awk '{print $NF}'`
+runtimeImgName=`awk -f $awkJsonPath $configJsonPath | grep -o "$HCIN" | head -n1`
+if [[ -z "${runtimeImgName}" ]]; then
+  runtimeImgName=`awk -f $awkJsonPath $configJsonPath | grep -o "$HGIN" | head -n1`
+  if [[ -z "${runtimeImgName}" ]]; then
+    runtimeImgName=`awk -f $awkJsonPath $configJsonPath | grep '\["Config","Image"\]' | awk -F/ '{print $(NF)}' | tr -d \"`
+  fi
+fi
+#-----------------------------------------------------------------#
+
+## if the container is hadoop_controller or hadoop_gateway, exit whit code 0
+# if not exit with code 0, the hadoop_controller will be failed to start 
+if [[  "${runtimeImgName}" = "hadoop_controller" ]]; then
+  echo "skip controller..." >> $logFile 
+  exit 0
+elif [[ "${runtimeImgName}" = "hadoop_gateway" ]]; then 
+  echo "skip gateway..." >> $logFile 
+  exit 0
+elif [[ ! -z "${runtimeImgName}" ]]; then
+  runtimeImgName=`echo ${runtimeImgName} | head -n1 | awk '{print $(NF-1)}'`
+  echo -e "\nModifying container which start from Image: \"${runtimeImgName}\"." >> $logFile 
+
+  ## get runtime container PID
+  # runcPid ----> containerProcessName ----> runtimeContainerPid
+  runcPid=`ps --no-headers -C docker-runc-current | awk '{print $1}'`
+  containerProcessName=`ps -o comm= --ppid ${runcPid} | awk '/INIT/{print $0}'`
+  runtimeContainerPid=`pgrep [${containerProcessName}]`
+  C_PID=$runtimeContainerPid
+  
+  ## if C_PID is 0, just avoid modify route
+  [ "x$C_PID" = 'x0' ] && C_PID=''
+  
+  ## C_PID is not 0 and got value, then start modify route
+  if [ "x$C_PID" != 'x' ]; then
+    if [[ ! -e ${NS_DIR} ]]; then
+      mkdir -p ${NS_DIR}
+    else
+      rm -rf ${NS_DIR}/*
+    fi
+  
+    ## link container's network namespace to "/vat/run/netns/"
+    # because the "ip netns exec" cmd can detect this folder
+    /usr/bin/ln -s /proc/$C_PID/ns/net /var/run/netns/$C_PID &>> $logFile
+    [[ $? -eq 0 ]] && echo  -e "\nLink ns successed.\n" >> $logFile
+
+    while read line; do
+      if [[ ! -z $line ]]; then
+        ROUTE[GW]=`echo $line | awk '{print $1}'`
+        ROUTE[DEST]=`echo $line | awk '{print $2}'`
+        /usr/sbin/ip -n $C_PID route add ${ROUTE[DEST]} via ${ROUTE[GW]}
+      fi
+    done < ${HadoopContainerRoute}
+
+    [[ $? -eq 0 ]] && echo -e "Route table now is : \n" >> $logFile
+    /usr/sbin/ip -n $C_PID route &>> $logFile
+  
+    echo -e "#----------------END:`date +%F\ %T\ %N`:END----------------#" >> $logFile
+  fi
+fi
+
+## clean up broken symlinks
+find /var/run/netns -xtype l -exec rm -f '{}' \;
