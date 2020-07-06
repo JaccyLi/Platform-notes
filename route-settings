@@ -18,7 +18,7 @@ HGIN="hadoop_gateway"
 NS_DIR="/var/run/netns"
 logFile="/tmp/hook.log"
 awkJsonPath="/tmp/JSON.awk"
-hadoopContainerRoute="/run/initramfs/live/HadoopContainerRoute.txt"
+ContainerRoute="/run/initramfs/live/Route.txt"
 
 ## debug log
 if [[ ! -f $logFile ]]; then
@@ -43,7 +43,11 @@ runtimeImgName=`awk -f $awkJsonPath $configJsonPath | grep -o "$HCIN" | head -n1
 if [[ -z "${runtimeImgName}" ]]; then
   runtimeImgName=`awk -f $awkJsonPath $configJsonPath | grep -o "$HGIN" | head -n1`
   if [[ -z "${runtimeImgName}" ]]; then
-    runtimeImgName=`awk -f $awkJsonPath $configJsonPath | grep '\["Config","Image"\]' | awk -F/ '{print $(NF)}' | tr -d \"`
+    if [[ -f ${awkJsonPath} ]]; then
+      runtimeImgName=`awk -f $awkJsonPath $configJsonPath | grep '\["Config","Image"\]' | awk -F/ '{print $(NF)}' | tr -d \"`
+    else
+      echo "File ${awkJsonPath} does not exists." >> $logFile
+    fi
   fi
 fi
 #-----------------------------------------------------------------#
@@ -83,13 +87,17 @@ elif [[ ! -z "${runtimeImgName}" ]]; then
     /usr/bin/ln -s /proc/$C_PID/ns/net /var/run/netns/$C_PID &>> $logFile
     [[ $? -eq 0 ]] && echo  -e "\nLink ns successed.\n" >> $logFile
 
-    while read line; do
-      if [[ ! -z $line ]]; then
-        ROUTE[GW]=`echo $line | awk '{print $1}'`
-        ROUTE[DEST]=`echo $line | awk '{print $2}'`
-        /usr/sbin/ip -n $C_PID route add ${ROUTE[DEST]} via ${ROUTE[GW]}
-      fi
-    done < ${HadoopContainerRoute}
+    if [[ -f ${ContainerRoute} ]]; then
+      while read line; do
+        if [[ ! -z $line ]]; then
+          ROUTE[GW]=`echo $line | awk '{print $1}'`
+          ROUTE[DEST]=`echo $line | awk '{print $2}'`
+          /usr/sbin/ip netns exec $C_PID /usr/sbin/route add -net ${ROUTE[DEST]} gw ${ROUTE[GW]} &>> $logFile
+        fi
+      done < ${ContainerRoute}
+    else
+      echo "File ${ContainerRoute} does not exists." >> $logFile
+    fi
 
     [[ $? -eq 0 ]] && echo -e "Route table now is : \n" >> $logFile
     /usr/sbin/ip -n $C_PID route &>> $logFile
