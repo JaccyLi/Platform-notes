@@ -100,7 +100,7 @@ elif [[ ! -z "${runtimeImgName}" ]]; then
     fi
 
     [[ $? -eq 0 ]] && echo -e "Route table now is : \n" >> $logFile
-    /usr/sbin/ip -n $C_PID route &>> $logFile
+    /usr/sbin/ip netns exec $C_PID /usr/sbin/route -n | sed '1,2d' &>> $logFile
   
     echo -e "#----------------END:`date +%F\ %T\ %N`:END----------------#" >> $logFile
   fi
